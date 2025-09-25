@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Editor con OCR e Annotazioni</title>
+    
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🖍️</text></svg>">
+    
+    <!-- Librerie necessarie -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.worker.min.js"></script>
+    <!-- jsPDF non è più necessario per salvare, ma lo lascio nel caso serva per future funzionalità -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'></script>
+
+    <style>
+        body {
+            font-family: sans-serif;
+            background-color: #f0f2f5;
+            margin: 0;
+            padding: 20px;
+        }
+        h1 { text-align: center; }
+        #controls { 
+            text-align: center; 
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+        }
+        #controls button {
+             padding: 5px 10px;
+             cursor: pointer;
+        }
+        #pdf-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+            padding: 20px 0;
+        }
+        .page-container {
+            position: relative;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+        .pdf-canvas, .drawing-canvas {
+            display: block;
+            width: 100%;
+            height: auto;
+        }
+        .drawing-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            touch-action: none;
+        }
+        #toolbox {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background-color: rgba(255, 255, 255, 0.98);
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            padding: 15px;
+            z-index: 1000;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+            display: none;
+            flex-direction: column;
+            gap: 10px;
+        }
+        #toolbox label, #toolbox strong { display: block; margin-bottom: 5px; }
+        #toolbox button {
+            width: 100%;
+            padding: 8px;
+            margin-top: 5px;
+            border-radius: 4px;
+            cursor: pointer;
+            border: 1px solid #6c757d;
+            background-color: #6c757d;
+            color: white;
+        }
+        #toolbox button:hover { background-color: #5a6268; }
+        #save-annotations-btn { background-color: #007bff; border-color: #007bff; }
+        #save-annotations-btn:hover { background-color: #0056b3; }
+        #ocr-btn { background-color: #28a745; border-color: #28a745; }
+        #ocr-btn:hover { background-color: #218838; }
+        #toolbox button:disabled { background-color: #cccccc; border-color: #999999; cursor: not-allowed; }
+
+        #minimize-btn-container { text-align: right; margin-bottom: -10px; }
+        #minimize-btn {
+            background: none;
+            border: none;
+            font-size: 20px;
+            cursor: pointer;
+            color: #888;
+            padding: 0 5px;
+        }
+        #maximize-btn {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            width: 50px;
+            height: 50px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+            font-size: 24px;
+            cursor: pointer;
+            z-index: 1001;
+            display: none; /* Inizialmente nascosto */
+            justify-content: center;
+            align-items: center;
+        }
+        #zoom-slider-container {
+            margin: 20px auto;
+            padding: 0 20px;
+            max-width: 500px;
+            text-align: center;
+            display: none;
+        }
+        #loading-message {
+            display: none;
+            position: fixed; top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 20px 30px;
+            border-radius: 8px;
+            z-index: 2000;
+            text-align: center;
+        }
+        #notification-popup {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background-color: #28a745;
+            color: white;
+            padding: 15px;
+            border-radius: 5px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            z-index: 2001;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.5s, visibility 0.5s;
+            max-width: 300px;
+            word-wrap: break-word;
+        }
+        #notification-popup.show {
+            opacity: 1;
+            visibility: visible;
+        }
+    </style>
+</head>
+<body>
+    <h1>PDF Editor con OCR e Annotazioni</h1>
+    <div id="controls">
+        <input type="file" id="file-input" accept="application/pdf" />
+        <button id="load-annotations-btn" disabled title="Prima carica un PDF, poi carica le sue annotazioni">Carica Annotazioni</button>
+        <input type="file" id="annotations-input" accept=".json" style="display: none;" />
+    </div>
+    <div id="zoom-slider-container">
+        <label for="zoom-slider">Zoom Visualizzazione:</label>
+        <input type="range" id="zoom-slider" min="0.5" max="2.5" step="0.1" value="1.0">
+    </div>
+    <div id="pdf-container"></div>
+
+    <div id="toolbox">
+        <div id="minimize-btn-container"><button id="minimize-btn" title="Minimizza">－</button></div>
+        <div>
+            <strong>Modalità Touch:</strong>
+            <label><input type="radio" name="action-mode" value="annotate" checked> Annota</label>
+            <label><input type="radio" name="action-mode" value="scroll"> Scorri</label>
+        </div>
+        <hr>
+        <div>
+            <strong>Strumento:</strong>
+            <label><input type="radio" name="tool" value="draw" checked> Matita</label>
+            <input type="range" id="draw-size" min="1" max="20" value="4"> <br/>
+            <label><input type="radio" name="tool" value="erase"> Gomma</label>
+            <input type="range" id="erase-size" min="5" max="50" value="20">
+            <label><input type="radio" name="tool" value="ocr"> Seleziona Testo (OCR)</label>
+        </div>
+        <hr>
+        <button id="ocr-btn" style="display: none;">Esegui OCR e Copia</button>
+        <button id="undo-btn">Annulla Ultima Modifica</button>
+        <button id="save-annotations-btn">Salva Annotazioni</button>
+    </div>
+
+    <button id="maximize-btn" title="Massimizza">❏</button>
+    <div id="loading-message"></div>
+    <div id="notification-popup">Testo copiato!</div>
+
+    <script>
+        // const { jsPDF } = window.jspdf; // Non più necessario per il salvataggio principale
+
+        // Elementi DOM
+        const fileInput = document.getElementById('file-input');
+        const pdfContainer = document.getElementById('pdf-container');
+        const toolbox = document.getElementById('toolbox');
+        const zoomSlider = document.getElementById('zoom-slider');
+        const zoomContainer = document.getElementById('zoom-slider-container');
+        const actionModeRadios = document.querySelectorAll('input[name="action-mode"]');
+        const toolRadios = document.querySelectorAll('input[name="tool"]');
+        const undoBtn = document.getElementById('undo-btn');
+        const saveAnnotationsBtn = document.getElementById('save-annotations-btn');
+        const ocrBtn = document.getElementById('ocr-btn');
+        const loadingMessage = document.getElementById('loading-message');
+        const notificationPopup = document.getElementById('notification-popup');
+        const minimizeBtn = document.getElementById('minimize-btn');
+        const maximizeBtn = document.getElementById('maximize-btn');
+        const loadAnnotationsBtn = document.getElementById('load-annotations-btn');
+        const annotationsInput = document.getElementById('annotations-input');
+        
+        // Stato dell'applicazione
+        let pdfDoc = null;
+        const RENDER_SCALE = 2.0;
+        let isDrawing = false;
+        let currentPath = [];
+        let cronologiaPagine = [];
+        let cronologiaGlobale = [];
+        let ocrSelections = [];
+        let currentAction = 'annotate';
+        
+        // --- GESTIONE EVENTI PRINCIPALI ---
+
+        fileInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const fileReader = new FileReader();
+            fileReader.onload = function() {
+                showLoading('Caricamento PDF...');
+                const typedarray = new Uint8Array(this.result);
+                pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.10.377/pdf.worker.min.js';
+                pdfjsLib.getDocument({ data: typedarray }).promise.then((pdf) => {
+                    pdfDoc = pdf;
+                    // Reset stato
+                    cronologiaPagine = Array.from({ length: pdfDoc.numPages }, () => []);
+                    cronologiaGlobale = [];
+                    ocrSelections = [];
+                    annotationsInput.value = ''; // Permette di ricaricare lo stesso file
+                    updateUndoButtonState();
+                    renderAllPages();
+                    toolbox.style.display = 'flex';
+                    zoomContainer.style.display = 'block';
+                    loadAnnotationsBtn.disabled = false; // Abilita caricamento annotazioni
+                }).catch(handleError).finally(() => showLoading(false));
+            };
+            fileReader.readAsArrayBuffer(file);
+        });
+        
+        loadAnnotationsBtn.addEventListener('click', () => annotationsInput.click());
+        annotationsInput.addEventListener('change', loadAnnotations);
+
+        zoomSlider.addEventListener('input', () => {
+            const zoomValue = parseFloat(zoomSlider.value);
+            pdfContainer.style.transform = `scale(${zoomValue})`;
+            pdfContainer.style.transformOrigin = 'top center';
+        });
+
+        actionModeRadios.forEach(radio => radio.addEventListener('change', (e) => {
+            currentAction = e.target.value;
+            updateCanvasTouchAction();
+        }));
+
+        toolRadios.forEach(radio => radio.addEventListener('change', (e) => {
+            ocrBtn.style.display = (e.target.value === 'ocr') ? 'block' : 'none';
+        }));
+
+        undoBtn.addEventListener('click', undoLastAction);
+        saveAnnotationsBtn.addEventListener('click', saveAnnotations);
+        ocrBtn.addEventListener('click', runOCR);
+        minimizeBtn.addEventListener('click', () => {
+            toolbox.style.display = 'none';
+            maximizeBtn.style.display = 'flex';
+        });
+        maximizeBtn.addEventListener('click', () => {
+            toolbox.style.display = 'flex';
+            maximizeBtn.style.display = 'none';
+        });
+
+        // --- FUNZIONI DI RENDERING ---
+
+        async function renderAllPages() {
+            pdfContainer.innerHTML = '';
+            if (!pdfDoc) return;
+            for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+                await renderPage(pageNum);
+            }
+            updateCanvasTouchAction();
+            zoomSlider.dispatchEvent(new Event('input'));
+        }
+
+        async function renderPage(pageNum) {
+            const page = await pdfDoc.getPage(pageNum);
+            const viewport = page.getViewport({ scale: RENDER_SCALE });
+            
+            const pageContainer = document.createElement('div');
+            pageContainer.className = 'page-container';
+            pageContainer.dataset.pageNumber = pageNum;
+            pageContainer.style.width = '80vw';
+            pageContainer.style.maxWidth = '1000px';
+
+            const pdfCanvas = document.createElement('canvas');
+            pdfCanvas.className = 'pdf-canvas';
+            pdfCanvas.height = viewport.height;
+            pdfCanvas.width = viewport.width;
+
+            const drawingCanvas = document.createElement('canvas');
+            drawingCanvas.className = 'drawing-canvas';
+            drawingCanvas.height = viewport.height;
+            drawingCanvas.width = viewport.width;
+
+            pageContainer.append(pdfCanvas, drawingCanvas);
+            pdfContainer.appendChild(pageContainer);
+
+            await page.render({ canvasContext: pdfCanvas.getContext('2d'), viewport }).promise;
+            addDrawingListeners(drawingCanvas);
+        }
+        
+        function redrawAllAnnotationsForPage(pageIndex) {
+            const canvas = document.querySelector(`.page-container[data-page-number="${pageIndex + 1}"] .drawing-canvas`);
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            cronologiaPagine[pageIndex].forEach(path => {
+                ctx.beginPath();
+                if (path.points.length > 0) {
+                    ctx.moveTo(path.points[0].x, path.points[0].y);
+                    path.points.forEach(point => ctx.lineTo(point.x, point.y));
+                
+                    if (path.tool === 'draw') {
+                        ctx.globalCompositeOperation = 'source-over';
+                        ctx.strokeStyle = path.color;
+                        ctx.lineWidth = path.size;
+                        ctx.lineCap = 'round';
+                        ctx.lineJoin = 'round';
+                        ctx.stroke();
+                    } else if (path.tool === 'erase') {
+                        ctx.globalCompositeOperation = 'destination-out';
+                        // Per il redraw della gomma, si applica direttamente la cancellazione
+                        const eraseSize = path.size;
+                        path.points.forEach(p => {
+                           ctx.clearRect(p.x - eraseSize / 2, p.y - eraseSize / 2, eraseSize, eraseSize);
+                        });
+                    }
+                }
+            });
+             
+            ocrSelections.filter(sel => sel.pageIndex === pageIndex).forEach(selection => {
+                ctx.beginPath();
+                ctx.moveTo(selection.path[0].x, selection.path[0].y);
+                selection.path.forEach(p => ctx.lineTo(p.x, p.y));
+                ctx.closePath();
+                ctx.fillStyle = 'rgba(0, 123, 255, 0.3)';
+                ctx.strokeStyle = 'rgba(0, 123, 255, 0.8)';
+                ctx.lineWidth = 2;
+                ctx.fill();
+                ctx.stroke();
+            });
+
+            ctx.globalCompositeOperation = 'source-over';
+        }
+
+        // --- LOGICA DI DISEGNO ---
+
+        function addDrawingListeners(canvas) {
+            const events = {
+                start: ['mousedown', 'touchstart'],
+                move: ['mousemove', 'touchmove'],
+                end: ['mouseup', 'mouseleave', 'touchend', 'touchcancel']
+            };
+            events.start.forEach(evt => canvas.addEventListener(evt, handleStart, { passive: false }));
+            events.move.forEach(evt => canvas.addEventListener(evt, handleMove, { passive: false }));
+            events.end.forEach(evt => canvas.addEventListener(evt, handleEnd));
+        }
+
+        function getCoords(e) {
+            const canvas = e.target;
+            const rect = canvas.getBoundingClientRect();
+            const evt = e.touches ? e.touches[0] : e;
+            return {
+                x: (evt.clientX - rect.left) * (canvas.width / rect.width),
+                y: (evt.clientY - rect.top) * (canvas.height / rect.height)
+            };
+        }
+
+        function handleStart(e) {
+            if (currentAction === 'scroll') return;
+            e.preventDefault();
+            isDrawing = true;
+            currentPath = [getCoords(e)];
+        }
+
+        function handleMove(e) {
+            if (!isDrawing || currentAction === 'scroll') return;
+            e.preventDefault();
+            const coords = getCoords(e);
+            currentPath.push(coords);
+
+            const tool = document.querySelector('input[name="tool"]:checked').value;
+            const canvas = e.target;
+            const ctx = canvas.getContext('2d');
+            
+            if (tool === 'draw') {
+                ctx.beginPath();
+                ctx.moveTo(currentPath[currentPath.length-2].x, currentPath[currentPath.length-2].y);
+                ctx.lineTo(coords.x, coords.y);
+                ctx.globalCompositeOperation = 'source-over';
+                ctx.strokeStyle = 'rgba(255, 0, 0, 0.7)';
+                ctx.lineWidth = document.getElementById('draw-size').value;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.stroke();
+            } else if (tool === 'erase') {
+                const eraseSize = document.getElementById('erase-size').value;
+                ctx.globalCompositeOperation = 'destination-out';
+                ctx.clearRect(coords.x - eraseSize/2, coords.y - eraseSize/2, eraseSize, eraseSize);
+            }
+        }
+
+        function handleEnd(e) {
+            if (!isDrawing) return;
+            isDrawing = false;
+            
+            // Per il tool 'erase', l'azione è già stata completata in handleMove.
+            // Salviamo comunque il percorso per un futuro sistema di "redo".
+            // Per i tool 'draw' e 'ocr' finalizziamo qui.
+            if (currentPath.length < 2 && document.querySelector('input[name="tool"]:checked').value !== 'erase') return;
+
+            const canvas = e.target;
+            const pageIndex = parseInt(canvas.closest('.page-container').dataset.pageNumber) - 1;
+            const tool = document.querySelector('input[name="tool"]:checked').value;
+
+            let pathObject;
+            if (tool === 'draw' || tool === 'erase') {
+                pathObject = {
+                    tool,
+                    points: [...currentPath],
+                    color: tool === 'draw' ? 'rgba(255, 0, 0, 0.7)' : null,
+                    size: (tool === 'draw') ? document.getElementById('draw-size').value : document.getElementById('erase-size').value
+                };
+                cronologiaPagine[pageIndex].push(pathObject);
+                // Per l'undo, salviamo solo le azioni che hanno un effetto visivo cumulativo ('draw')
+                // L'undo della gomma è complesso, quindi per ora lo escludiamo dalla cronologia globale per semplicità.
+                if (tool === 'draw') {
+                    cronologiaGlobale.push({ pageIndex, path: pathObject });
+                }
+                redrawAllAnnotationsForPage(pageIndex); // Ridisegna per consolidare il tratto
+            } else if (tool === 'ocr') {
+                ocrSelections.push({ pageIndex, path: [...currentPath] });
+                redrawAllAnnotationsForPage(pageIndex);
+            }
+            
+            updateUndoButtonState();
+            currentPath = [];
+        }
+
+        // --- FUNZIONI AZIONI ---
+
+        function undoLastAction() {
+            if (cronologiaGlobale.length === 0) return;
+            const lastAction = cronologiaGlobale.pop();
+            const pageHistory = cronologiaPagine[lastAction.pageIndex];
+            
+            // Rimuovi l'azione dalla cronologia della pagina
+            const indexToRemove = pageHistory.findIndex(p => p === lastAction.path);
+            if (indexToRemove > -1) pageHistory.splice(indexToRemove, 1);
+            
+            redrawAllAnnotationsForPage(lastAction.pageIndex);
+            updateUndoButtonState();
+        }
+
+        function saveAnnotations() {
+            if (cronologiaGlobale.length === 0) {
+                showNotification("Nessuna annotazione da salvare.", 3000, true);
+                return;
+            }
+            try {
+                const dataStr = JSON.stringify(cronologiaGlobale);
+                const blob = new Blob([dataStr], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                const pdfFileName = fileInput.files[0] ? fileInput.files[0].name.replace(/\.pdf$/i, '') : 'documento';
+                a.href = url;
+                a.download = `${pdfFileName}_annotazioni.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                showNotification("Annotazioni salvate con successo!", 3000);
+            } catch (error) {
+                handleError(error);
+            }
+        }
+        
+        function loadAnnotations(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            if (!pdfDoc) {
+                alert("Per favore, carica prima il file PDF originale a cui queste annotazioni si riferiscono.");
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                try {
+                    const loadedAnnotations = JSON.parse(event.target.result);
+                    if (!Array.isArray(loadedAnnotations)) {
+                        throw new Error("Il file di annotazioni non è valido.");
+                    }
+                    
+                    // Applica le annotazioni caricate
+                    cronologiaGlobale = loadedAnnotations;
+                    cronologiaPagine = Array.from({ length: pdfDoc.numPages }, () => []);
+                    
+                    cronologiaGlobale.forEach(action => {
+                        if (action.pageIndex < pdfDoc.numPages) {
+                            cronologiaPagine[action.pageIndex].push(action.path);
+                        }
+                    });
+
+                    // Ridisegna tutte le pagine con le nuove annotazioni
+                    for (let i = 0; i < pdfDoc.numPages; i++) {
+                        redrawAllAnnotationsForPage(i);
+                    }
+                    
+                    updateUndoButtonState();
+                    showNotification("Annotazioni caricate con successo!");
+
+                } catch (error) {
+                    handleError(new Error("Impossibile leggere il file di annotazioni. Assicurati che sia un file .json valido."));
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        async function runOCR() {
+            if (ocrSelections.length === 0) {
+                alert("Nessuna area selezionata. Disegna delle forme sulle parti di testo che vuoi riconoscere.");
+                return;
+            }
+            showLoading('Riconoscimento testo (OCR)...');
+
+            try {
+                const worker = await Tesseract.createWorker('ita');
+                let fullText = '';
+
+                for (const selection of ocrSelections) {
+                    const pageContainer = document.querySelector(`.page-container[data-page-number="${selection.pageIndex + 1}"]`);
+                    const mergedCanvas = await mergeCanvases(pageContainer);
+                    
+                    const xs = selection.path.map(p => p.x);
+                    const ys = selection.path.map(p => p.y);
+                    const minX = Math.min(...xs), maxX = Math.max(...xs);
+                    const minY = Math.min(...ys), maxY = Math.max(...ys);
+                    const width = maxX - minX, height = maxY - minY;
+
+                    if (width <= 0 || height <= 0) continue;
+
+                    const cropCanvas = document.createElement('canvas');
+                    cropCanvas.width = width;
+                    cropCanvas.height = height;
+                    const cropCtx = cropCanvas.getContext('2d');
+                    cropCtx.drawImage(mergedCanvas, minX, minY, width, height, 0, 0, width, height);
+
+                    const { data: { text } } = await worker.recognize(cropCanvas);
+                    fullText += text + '\n';
+                }
+
+                await worker.terminate();
+
+                if (fullText.trim()) {
+                    await navigator.clipboard.writeText(fullText.trim());
+                    showNotification(`Testo copiato:\n"${fullText.trim()}"`);
+                } else {
+                    showNotification("Nessun testo riconosciuto.", 5000, true);
+                }
+
+                const pagesToRedraw = new Set(ocrSelections.map(s => s.pageIndex));
+                ocrSelections = [];
+                pagesToRedraw.forEach(pageIndex => redrawAllAnnotationsForPage(pageIndex));
+
+            } catch (error) {
+                handleError(error);
+            } finally {
+                showLoading(false);
+            }
+        }
+
+
+        // --- FUNZIONI UTILITY ---
+
+        async function mergeCanvases(container) {
+            const pdfCanvas = container.querySelector('.pdf-canvas');
+            const drawingCanvas = container.querySelector('.drawing-canvas');
+            const mergedCanvas = document.createElement('canvas');
+            mergedCanvas.width = pdfCanvas.width;
+            mergedCanvas.height = pdfCanvas.height;
+            const ctx = mergedCanvas.getContext('2d');
+            ctx.drawImage(pdfCanvas, 0, 0);
+            ctx.drawImage(drawingCanvas, 0, 0);
+            return mergedCanvas;
+        }
+        
+        function updateUndoButtonState() {
+            undoBtn.disabled = cronologiaGlobale.length === 0;
+        }
+
+        function updateCanvasTouchAction() {
+            document.querySelectorAll('.drawing-canvas').forEach(canvas => {
+                canvas.style.touchAction = (currentAction === 'annotate') ? 'none' : 'auto';
+            });
+        }
+        
+        function showLoading(message) {
+            if (message) {
+                loadingMessage.textContent = message;
+                loadingMessage.style.display = 'block';
+            } else {
+                loadingMessage.style.display = 'none';
+            }
+        }
+        
+        function showNotification(message, duration = 3000, isError = false) {
+            notificationPopup.textContent = message;
+            notificationPopup.style.backgroundColor = isError ? '#dc3545' : '#28a745';
+            notificationPopup.classList.add('show');
+            setTimeout(() => notificationPopup.classList.remove('show'), duration);
+        }
+
+        function handleError(error) {
+            console.error('Si è verificato un errore:', error);
+            showNotification(`Errore: ${error.message || 'Operazione fallita'}`, 5000, true);
+        }
+    </script>
+</body>
+</html>
